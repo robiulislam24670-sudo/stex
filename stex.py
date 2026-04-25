@@ -146,10 +146,12 @@ async def get_console_view(update, context, search_query=None, loading_message=N
         else: await update.effective_chat.send_message(err_msg, parse_mode='HTML')
 
 
-# --- 📨 MONITORING LOOP (Updated with OTP Extraction) ---
+# --- 📨 MONITORING LOOP (Full SMS Included) ---
 async def check_otp_loop(session, token, headers, number, context, chat_id, range_val):
     today = datetime.now().strftime('%Y-%m-%d')
-    url = f'https://stexsms.com/mapi/v1/mdashboard/getnum/info?date={today}&page=1&search={number}&status='
+    search_num = number.replace("+", "").replace(" ", "")
+    url = f'https://stexsms.com/mapi/v1/mdashboard/getnum/info?date={today}&page=1&search={search_num}&status='
+    
     h = headers.copy()
     h.update({'mauthtoken': token})
     
@@ -161,47 +163,65 @@ async def check_otp_loop(session, token, headers, number, context, chat_id, rang
                 if data:
                     target = data[0]
                     otp_text = target.get('otp') or target.get('message') or target.get('sms')
+                    
                     if target.get('status') == "success" and otp_text:
-                        
-                        # OTP Extraction Logic (3 to 10 digits)
+                        # ১. ওটিপি এক্সট্রাকশন (৩ থেকে ১০ ডিজিট)
                         extracted_otp = "Not Found"
                         match_space = re.search(r'\d{1,8}\s\d{1,8}', otp_text)
                         match_solid = re.search(r'\d{3,10}', otp_text)
                         
-                        if match_space: extracted_otp = match_space.group()
-                        elif match_solid: extracted_otp = match_solid.group()
-                        
-                        log_stat('otp_success')
-                        safe_sms = html.escape(otp_text)
+                        if match_space: 
+                            extracted_otp = match_space.group().replace(" ", "")
+                        elif match_solid: 
+                            extracted_otp = match_solid.group()
 
-                        final_msg = (
+                        # ২. ডাটা ম্যাপিং
+                        app_name = target.get('full_number') or "Unknown Service"
+                        country = target.get('country') or "Global"
+                        safe_sms = html.escape(otp_text) # ফুল এসএমএস ক্লিন করা
+
+                        # ৩. ইউজারকে পার্সোনাল মেসেজ
+                        user_text = (
                             f"⚡️ <b>OTP RECEIVED!</b>\n"
                             f"━━━━━━━━━━━━━━\n"
                             f"📱 Number: <code>{number}</code>\n"
+                            f"🛠 Service: <code>{app_name}</code>\n"
                             f"🟢 OTP: <code>{extracted_otp}</code>\n"
-                            f"🔑 Code: <code>{safe_sms}</code>\n"
                             f"━━━━━━━━━━━━━━"
                         )
-                        
-                        await context.bot.send_message(chat_id=chat_id, text=final_msg, parse_mode='HTML')
+                        await context.bot.send_message(chat_id=chat_id, text=user_text, parse_mode='HTML')
 
-                        # Group Log
-                        masked_num = f"{number[:5]}****{number[-4:]}"
+                        # ৪. ওটিপি গ্রুপে মেসেজ পাঠানো (ফুল এসএমএস সহ)
+                        masked_num = f"{number[:6]}****{number[-3:]}"
                         group_msg = (
                             f"🔔 <b>PREMIUM ALERT</b>\n"
                             f"━━━━━━━━━━━━━━\n"
                             f"📞 Phone: <code>{masked_num}</code>\n"
                             f"🌐 Range: <code>{range_val}</code>\n"
-                            f"📩 OTP: <code>{extracted_otp}</code>\n"
+                            f"🌍 Country: <code>{country}</code>\n"
+                            f"🛠 Service: <code>{app_name}</code>\n\n"
+                            f"📩 OTP: <code>{extracted_otp}</code>\n\n"
+                            f"💬 <code>{safe_sms}</code>\n"
                             f"━━━━━━━━━━━━━━"
                         )
-                        try: await context.bot.send_message(chat_id=int(OTP_GROUP_ID), text=group_msg, parse_mode='HTML')
-                        except: pass
-                        return
+                        
+                        try:
+                            await context.bot.send_message(
+                                chat_id=int(OTP_GROUP_ID), 
+                                text=group_msg, 
+                                parse_mode='HTML'
+                            )
+                        except:
+                            pass
+                            
+                        log_stat('otp_success')
+                        return 
+            
             await asyncio.sleep(5)
         except Exception as e: 
             print(f"OTP Loop Error: {e}")
             await asyncio.sleep(5)
+
 
 # --- 🛠 CORE ACTION: GET NUMBER ---
 async def get_number_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
