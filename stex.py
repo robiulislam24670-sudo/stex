@@ -3,24 +3,26 @@ import requests
 import asyncio
 import sqlite3
 import os
+import html
+import re
 import platform
 import warnings
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 
-# ওয়ার্নিং ফিল্টার
+# ওয়ার্নিং ফিল্টার
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # --- 💠 CONFIGURATION 💠 ---
 BOT_TOKEN = "8337640596:AAG1gfVqJPt-PqbpLLU7vLnGWfv1hmT3wk4"
 USER_EMAIL = "mdrobiulshaek556@gmail.com"
 USER_PASS = "Robiul@159358"
-ADMINS = [6864515052]
 OTP_GROUP_ID = -1003853823094 
 OTP_GROUP_LINK = "https://t.me/stexsmsotp"
 
-SET_RANGE = 1
+# Conversation States
+SET_RANGE, SEARCH_SERVICE = range(2)
 
 def clear_console():
     if platform.system() == "Windows": os.system('cls')
@@ -35,7 +37,6 @@ logging.basicConfig(level=logging.ERROR)
 def setup_db():
     conn = sqlite3.connect('premium_v5.db')
     cursor = conn.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, status TEXT DEFAULT 'active')''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS stats (date TEXT, type TEXT)''')
     conn.commit()
     conn.close()
@@ -48,10 +49,14 @@ def log_stat(stat_type):
     conn.commit()
     conn.close()
 
-# --- 🚀 StexSMS API ---
+# --- 🚀 StexSMS API SESSION ---
 def get_session_and_token():
     session = requests.Session()
-    headers = {'accept': 'application/json, text/plain, */*', 'user-agent': 'Mozilla/5.0', 'origin': 'https://stexsms.com'}
+    headers = {
+        'accept': 'application/json, text/plain, */*',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'origin': 'https://stexsms.com'
+    }
     try:
         resp = session.post("https://stexsms.com/mapi/v1/mauth/login", 
                             json={"email": USER_EMAIL, "password": USER_PASS}, headers=headers, timeout=15)
@@ -61,7 +66,87 @@ def get_session_and_token():
             return session, token, headers
     except: return None, None, None
 
-# --- 📨 MONITORING LOOP ---
+# --- 🛰 LIVE CONSOLE VIEW (Updated with HTML Parse Mode) ---
+async def get_console_view(update, context, search_query=None, loading_message=None):
+    session, token, headers = get_session_and_token()
+    
+    if not session:
+        msg = "❌ Session Error. Login failed!"
+        if loading_message: await loading_message.edit_text(msg)
+        elif update.callback_query: await update.callback_query.edit_message_text(msg)
+        return
+
+    h = headers.copy()
+    h.update({'mauthtoken': token})
+    
+    try:
+        resp = session.get('https://stexsms.com/mapi/v1/mdashboard/console/info', headers=h, timeout=12)
+        
+        if resp.status_code == 200:
+            data = resp.json().get('data', {})
+            logs = data.get('logs', [])
+            
+            status_title = f" ({search_query})" if search_query else ""
+            console_text = f"🛰 <b>LIVE NETWORK CONSOLE</b>{status_title}\n━━━━━━━━━━━━━━━━━━\n"
+            
+            count = 0
+            for i in logs:
+                app_name = html.escape(i.get('app_name') or "Unknown")
+                sms_body = i.get('sms') or i.get('otp') or i.get('message') or "Waiting for SMS..."
+                
+                if search_query:
+                    if (search_query.lower() not in app_name.lower()) and (search_query.lower() not in sms_body.lower()):
+                        continue
+
+                time_val = i.get('time') or datetime.now().strftime('%H:%M:%S')
+                number = i.get('number') or "Unknown"
+                srv_range = i.get('range') or "N/A"
+                
+                # HTML Escape for sms_body to prevent parsing errors
+                safe_sms = html.escape(sms_body)
+
+                console_text += (
+                    f"🌐 App: <b>{app_name}</b>\n"
+                    f"🕒 Time: {time_val}\n"
+                    f"📱 Num: <code>{number}</code>\n"
+                    f"🎯 Range: <code>{srv_range}</code>\n"
+                    f"➜ SMS: <code>{safe_sms}</code>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                )
+                count += 1
+                if count >= 10: break 
+
+            if count == 0:
+                console_text += "📭 No recent logs found matching your request."
+
+            nav_btns = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔍 Search", callback_data="open_search"),
+                 InlineKeyboardButton("🔄 Refresh", callback_data="refresh_console")]
+            ])
+
+            try:
+                if loading_message:
+                    await loading_message.edit_text(console_text, reply_markup=nav_btns, parse_mode='HTML')
+                elif update.callback_query:
+                    await update.callback_query.edit_message_text(console_text, reply_markup=nav_btns, parse_mode='HTML')
+                else:
+                    await update.message.reply_text(console_text, reply_markup=nav_btns, parse_mode='HTML')
+            except Exception as e:
+                if "Message is not modified" not in str(e):
+                    error_log = f"⚠️ <b>Edit Error:</b> <code>{html.escape(str(e))}</code>"
+                    if update.callback_query: await update.callback_query.message.reply_text(error_log, parse_mode='HTML')
+                    else: await update.message.reply_text(error_log, parse_mode='HTML')
+
+        else:
+            await update.effective_chat.send_message(f"❌ API Error: {resp.status_code}")
+            
+    except Exception as e:
+        err_msg = f"⚠️ <b>System Error:</b> <code>{html.escape(str(e))}</code>"
+        if loading_message: await loading_message.edit_text(err_msg, parse_mode='HTML')
+        else: await update.effective_chat.send_message(err_msg, parse_mode='HTML')
+
+
+# --- 📨 MONITORING LOOP (Updated with OTP Extraction) ---
 async def check_otp_loop(session, token, headers, number, context, chat_id, range_val):
     today = datetime.now().strftime('%Y-%m-%d')
     url = f'https://stexsms.com/mapi/v1/mdashboard/getnum/info?date={today}&page=1&search={number}&status='
@@ -72,35 +157,53 @@ async def check_otp_loop(session, token, headers, number, context, chat_id, rang
         try:
             resp = session.get(url, headers=h, timeout=10)
             if resp.status_code == 200:
-                json_data = resp.json()
-                numbers_list = json_data.get('data', {}).get('numbers', [])
-                if numbers_list:
-                    target = numbers_list[0]
-                    otp_text = target.get('otp') or target.get('message')
-                    service_name = target.get('app_name')
-                    
+                data = resp.json().get('data', {}).get('numbers', [])
+                if data:
+                    target = data[0]
+                    otp_text = target.get('otp') or target.get('message') or target.get('sms')
                     if target.get('status') == "success" and otp_text:
+                        
+                        # OTP Extraction Logic (3 to 10 digits)
+                        extracted_otp = "Not Found"
+                        match_space = re.search(r'\d{1,8}\s\d{1,8}', otp_text)
+                        match_solid = re.search(r'\d{3,10}', otp_text)
+                        
+                        if match_space: extracted_otp = match_space.group()
+                        elif match_solid: extracted_otp = match_solid.group()
+                        
                         log_stat('otp_success')
+                        safe_sms = html.escape(otp_text)
+
+                        final_msg = (
+                            f"⚡️ <b>OTP RECEIVED!</b>\n"
+                            f"━━━━━━━━━━━━━━\n"
+                            f"📱 Number: <code>{number}</code>\n"
+                            f"🟢 OTP: <code>{extracted_otp}</code>\n"
+                            f"🔑 Code: <code>{safe_sms}</code>\n"
+                            f"━━━━━━━━━━━━━━"
+                        )
+                        
+                        await context.bot.send_message(chat_id=chat_id, text=final_msg, parse_mode='HTML')
+
+                        # Group Log
                         masked_num = f"{number[:5]}****{number[-4:]}"
-
-                        await context.bot.send_message(
-                            chat_id=chat_id, 
-                            text=f"⚡️ **OTP RECEIVED!**\n━━━━━━━━━━━━━━\n\📱 Number: `{number}`\n\n🔑 Code: `{otp_text}`\n━━━━━━━━━━━━━━", 
-                            parse_mode='Markdown'
-                        )
-
                         group_msg = (
-                            f"🔔 **PREMIUM SMS ALERT**\n━━━━━━━━━━━━━━\n"
-                            f"📞 Phone: `{masked_num}`\n🌐 Range: `{range_val}`\n"
-                            f"🛠 Service: `{service_name}`\n\n📩 OTP: `{otp_text}`\n━━━━━━━━━━━━━━"
+                            f"🔔 <b>PREMIUM ALERT</b>\n"
+                            f"━━━━━━━━━━━━━━\n"
+                            f"📞 Phone: <code>{masked_num}</code>\n"
+                            f"🌐 Range: <code>{range_val}</code>\n"
+                            f"📩 OTP: <code>{extracted_otp}</code>\n"
+                            f"━━━━━━━━━━━━━━"
                         )
-                        try: await context.bot.send_message(chat_id=int(OTP_GROUP_ID), text=group_msg, parse_mode='Markdown')
+                        try: await context.bot.send_message(chat_id=int(OTP_GROUP_ID), text=group_msg, parse_mode='HTML')
                         except: pass
                         return
             await asyncio.sleep(5)
-        except: await asyncio.sleep(5)
+        except Exception as e: 
+            print(f"OTP Loop Error: {e}")
+            await asyncio.sleep(5)
 
-# --- 🛠 CORE ACTION: GET NUMBER (With Message Edit Logic) ---
+# --- 🛠 CORE ACTION: GET NUMBER ---
 async def get_number_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     range_val = context.user_data.get('service_range')
     if not range_val:
@@ -110,10 +213,8 @@ async def get_number_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, c
     
     try:
         if query:
-            # বাটন থেকে আসলে আগের মেসেজ এডিট হবে
             status_msg = await query.edit_message_text("🔄 Getting Number plz w8.........")
         else:
-            # মেনু থেকে আসলে নতুন মেসেজ দিবে
             status_msg = await context.bot.send_message(chat_id=chat_id, text="🔄 Processing API Request...")
 
         session, token, headers = get_session_and_token()
@@ -134,18 +235,18 @@ async def get_number_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, c
             except: pass
 
         if not nums: 
-            return await status_msg.edit_text("🚫 **Out of Stock!** Try another range.")
+            return await status_msg.edit_text("🚫 <b>Out of Stock!</b> Try another range.", parse_mode='HTML')
         
         user_btns = InlineKeyboardMarkup([
             [InlineKeyboardButton("♻️ Change Number", callback_data="req_new_num")],
             [InlineKeyboardButton("📢 OTP Group", url=OTP_GROUP_LINK)]
         ])
 
-        res = f"✅ **Numbers Assigned**\n━━━━━━━━━━━━━━\n1️⃣ `{nums[0]}`\n"
-        if len(nums)>1: res += f"2️⃣ `{nums[1]}`\n"
-        res += f"\n⏳ *Monitoring for 5 minutes...*"
+        res = f"✅ <b>Numbers Assigned</b>\n━━━━━━━━━━━━━━\n1️⃣ <code>{nums[0]}</code>\n"
+        if len(nums)>1: res += f"2️⃣ <code>{nums[1]}</code>\n"
+        res += f"\n⏳ <i>Monitoring for 5 minutes...</i>"
         
-        await status_msg.edit_text(res, parse_mode='Markdown', reply_markup=user_btns)
+        await status_msg.edit_text(res, parse_mode='HTML', reply_markup=user_btns)
 
         for num in nums:
             asyncio.create_task(check_otp_loop(session, token, headers, num, context, chat_id, range_val))
@@ -153,98 +254,78 @@ async def get_number_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, c
     except Exception as e:
         print(f"Error in get_number: {e}")
 
-# --- 🛠 HANDLERS ---
+# --- 🕹 HANDLERS ---
 async def start(update, context):
     clear_console()
-    menu = [
-        [KeyboardButton("📱 Get Number"), KeyboardButton("🚀 Console")],
-        [KeyboardButton("⚙️ Range Input")]
-    ]
+    menu = [[KeyboardButton("📱 Get Number"), KeyboardButton("🚀 Console")], [KeyboardButton("⚙️ Range Input")]]
+    current_range = context.user_data.get('service_range', 'Not Set')
     await update.message.reply_text(
-        f"👑 MRS ROBI PREMIUM \n━━━━━━━━━━━━━━\n🎯 Active Range: `{context.user_data.get('service_range', 'None')}`\n🟢 Status: `Online`", 
-        parse_mode='Markdown', reply_markup=ReplyKeyboardMarkup(menu, resize_keyboard=True)
+        f"👑 <b>MRS ROBI PREMIUM</b>\n━━━━━━━━━━━━━━\n🎯 Active Range: <code>{current_range}</code>", 
+        reply_markup=ReplyKeyboardMarkup(menu, resize_keyboard=True), parse_mode='HTML'
     )
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_text(update, context):
     text = update.message.text
     chat_id = update.effective_chat.id
     
-    if text == "📱 Get Number":
+    if text == "📱 Get Number": 
         await get_number_logic(update, context, chat_id)
-
     elif text == "🚀 Console":
-        status_msg = await update.message.reply_text("⏳ Active Ranges Collecting.....W8")
-        session, token, headers = get_session_and_token()
-        if not session: return await status_msg.edit_text("❌ Server Timeout.\nTry Again...")
-        
-        h = headers.copy()
-        h.update({'mauthtoken': token})
-        try:
-            resp = session.get('https://stexsms.com/mapi/v1/mdashboard/console/info', headers=h, timeout=10)
-            if resp.status_code == 200:
-                logs = resp.json().get('data', {}).get('logs', [])
-                keyboard = []
-                temp_row = []
-                seen = set()
-                for i in logs:
-                    num = i.get('number')
-                    app_name = i.get('app_name', 'Unknown')
-                    # স্টার ওয়ালা বা আননোন অ্যাপ ফিল্টার
-                    if not app_name or "*" in app_name or app_name == "Unknown": continue
-                    if num and num not in seen:
-                        btn_text = f"🔹 {app_name} | {num}XXX" # ৩টি X নিশ্চিত
-                        temp_row.append(InlineKeyboardButton(btn_text, callback_data=f"set_r_{num}"))
-                        seen.add(num)
-                        if len(temp_row) == 2:
-                            keyboard.append(temp_row)
-                            temp_row = []
-                        if len(seen) >= 16: break
-                
-                if temp_row: keyboard.append(temp_row)
-                if keyboard:
-                    await status_msg.edit_text("🛰 **Live Network Console:**", reply_markup=InlineKeyboardMarkup(keyboard))
-                else:
-                    await status_msg.edit_text("❌ No valid active ranges found.")
-            else: await status_msg.edit_text("❌ No data in console.")
-        except: await status_msg.edit_text("❌ Connection Error.")
-
+        loading_msg = await update.message.reply_text("⏳ <b>Connecting to Network Console...</b>", parse_mode='HTML')
+        await get_console_view(update, context, loading_message=loading_msg)
     elif text == "⚙️ Range Input":
-        await update.message.reply_text("✍️ **Enter Custom Range:**\n*(Example: 23762180)*")
+        await update.message.reply_text("✍️ Enter Custom Range (e.g. 99206):")
         return SET_RANGE
 
-async def save_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    val = update.message.text.strip()
-    # সব ধরণের X রিমুভ করে শুধু ৩টি X বসানো
-    clean_val = val.upper().replace("X", "") 
-    final_val = f"{clean_val}XXX"
-    context.user_data['service_range'] = final_val
-    await update.message.reply_text(f"✅ System Range Saved: `{final_val}`")
+async def save_range(update, context):
+    val = update.message.text.strip().upper().replace("X", "") + "XXX"
+    context.user_data['service_range'] = val
+    await update.message.reply_text(f"🎯 Range Updated: <code>{val}</code>", parse_mode='HTML')
     return ConversationHandler.END
 
-async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def search_handler(update, context):
+    query = update.message.text.strip()
+    await get_console_view(update, context, search_query=query)
+    return ConversationHandler.END
+
+async def cb_handler(update, context):
     query = update.callback_query
     await query.answer()
-    chat_id = update.effective_chat.id
     
-    if query.data.startswith("set_r_"):
-        val = query.data.replace("set_r_", "").upper().replace("X", "") + "XXX"
-        context.user_data['service_range'] = val
-        await query.edit_message_text(f"✅ System Range Set to: `{val}`")
-        
-    elif query.data == "req_new_num":
-        await get_number_logic(update, context, chat_id)
+    if query.data == "req_new_num":
+        await get_number_logic(update, context, update.effective_chat.id)
+    elif query.data == "refresh_console":
+        await query.edit_message_text("🔄 <b>Refreshing Console... Please wait.</b>", parse_mode='HTML')
+        await get_console_view(update, context)
+    elif query.data == "open_search":
+        search_menu = [
+            [InlineKeyboardButton("📘 Facebook", callback_data="fast:facebook"),
+             InlineKeyboardButton("🟢 WhatsApp", callback_data="fast:whatsapp")],
+            [InlineKeyboardButton("✍️ Custom Input", callback_data="custom_input")]
+        ]
+        await query.message.reply_text("🔍 <b>Select Service or Search:</b>", reply_markup=InlineKeyboardMarkup(search_menu), parse_mode='HTML')
+    elif query.data.startswith("fast:"):
+        q = query.data.split(":")[1]
+        await query.edit_message_text(f"🔍 <b>Searching for: {q}...</b>", parse_mode='HTML')
+        await get_console_view(update, context, search_query=q)
+    elif query.data == "custom_input":
+        await query.message.reply_text("🔎 টাইপ করুন আপনি কী সার্চ করতে চান (যেমন: imo, google):")
+        return SEARCH_SERVICE
 
-# --- 🏁 RUN BOT ---
 def main():
     setup_db()
     clear_console()
-    
-    # নেটওয়ার্ক স্ট্যাবিলিটির জন্য টাইমআউট বাড়ানো হয়েছে
-    app = Application.builder().token(BOT_TOKEN).read_timeout(30).connect_timeout(30).build()
+    app = Application.builder().token(BOT_TOKEN).build()
     
     conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex('^⚙️ Range Input$'), handle_text)],
-        states={SET_RANGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_range)]},
+        entry_points=[
+            MessageHandler(filters.Regex('^⚙️ Range Input$'), handle_text),
+            CallbackQueryHandler(cb_handler, pattern="^custom_input$")
+        ],
+        states={
+            SET_RANGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_range)],
+            SEARCH_SERVICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_handler)]
+        },
         fallbacks=[CommandHandler("start", start)],
         per_message=False 
     )
@@ -254,6 +335,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(cb_handler))
     
+    print("🚀 Bot is Running...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
