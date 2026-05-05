@@ -14,7 +14,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # --- 💠 ১. কনফিগারেশন 💠 ---
-BOT_TOKEN = "8337640596:AAG1gfVqJPt-PqbpLLU7vLnGWfv1hmT3wk4"
+BOT_TOKEN = "8337640596:AAHLWBD8IQ1IOGvMyE0bdqyyucDiokHNZMA"
 BASE_URL = "https://x.mnitnetwork.com/mapi/v1"
 USER_EMAIL = "mdrobiulshaek556@gmail.com"
 USER_PASS = "Robiul@159358"
